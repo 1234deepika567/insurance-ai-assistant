@@ -32,27 +32,26 @@ let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
     const apiKey = process.env.GEMINI_API_KEY;
+    console.log("Checking GEMINI_API_KEY registration status...");
     if (!isValidGeminiKey(apiKey)) {
-      throw new Error("GEMINI_API_KEY environment variable is not configured or holds a placeholder.");
+      console.warn("GEMINI_API_KEY is not configured or holds a placeholder. Falling back to Local Heuristics engine.");
+      throw new Error("GEMINI_API_KEY environment variable is not configured.");
     }
-    // Clean initialization without complex options to avoid runtime mismatch crashes
     aiClient = new GoogleGenAI({ apiKey: apiKey! });
   }
   return aiClient;
 }
 
-// 100% Pure JS PDF Parser - Zero binary dependencies, serverless-proof!
+// 100% Pure JS PDF Parser - Completely safe for serverless runtime!
 function parsePdfBufferPureJS(buffer: Buffer): string {
   try {
     const content = buffer.toString("binary");
-    // Extract all text inside PDF parentheses string matches, e.g., (Text content here)
     const textMatches = content.match(/\(([^)]*)\)/g);
     if (!textMatches) return "";
     
     return textMatches
       .map(match => {
-        let text = match.slice(1, -1); // Strip outer brackets
-        // Unescape standard PDF slash sequences
+        let text = match.slice(1, -1);
         text = text
           .replace(/\\([\s\S])/g, "$1")
           .replace(/\r/g, " ")
@@ -61,7 +60,6 @@ function parsePdfBufferPureJS(buffer: Buffer): string {
       })
       .filter(text => {
         if (text.length < 2) return false;
-        // Exclude internal PDF operator mappings
         if (text.startsWith("/") || text.includes("font") || text.includes("Encoding")) return false;
         return /^[a-zA-Z0-9\s.,;:\-_'\"!@#$%^&*()=[\]{}<>?/\\+~|₹₹]+$/.test(text);
       })
@@ -83,7 +81,6 @@ function isNumericOrSerial(str: string): boolean {
   return false;
 }
 
-// Extract a clean name from the filename as a helper fallback
 function extractNameFromFileName(fileName: string): string {
   if (!fileName) return "Valued Policyholder";
   const baseName = fileName.replace(/\.[^/.]+$/, "");
@@ -122,7 +119,6 @@ function formatName(name: string): string {
   return name.trim().split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
 }
 
-// Extract Name from PDF raw text
 function extractNameFromText(text: string): string {
   if (!text) return "Valued Policyholder";
   const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
@@ -175,7 +171,6 @@ function extractNameFromText(text: string): string {
   return "Valued Policyholder";
 }
 
-// 100% Dynamic Text Analyzer fallback mapping (Zero hardcoded values)
 async function extractAnalysisFromPdfContent(pdfBase64: string, fileName: string): Promise<{
   policyNumber: string;
   insuredName: string;
@@ -237,7 +232,6 @@ async function extractAnalysisFromPdfContent(pdfBase64: string, fileName: string
   return result;
 }
 
-// Direct local keyword mapping parser (No hardcoded answers)
 function generateKeywordLocalResponse(message: string, analysis: any): string {
   const msg = message.toLowerCase();
   if (!analysis) return "This information is not available in the uploaded policy.";
@@ -287,13 +281,17 @@ app.post("/api/reinitialize", (req, res): any => {
   }
 });
 
-// 1. Analyze Policy PDF Endpoint (Directly runs Gemini 2.5 on actual uploaded document)
+// 1. Analyze Policy PDF Endpoint
 app.post("/api/analyze-policy", async (req, res): Promise<any> => {
+  console.log("--- REQUEST RECEIVED: /api/analyze-policy ---");
   try {
     const { pdfBase64, fileName } = req.body;
     if (!pdfBase64) {
+      console.error("Error: pdfBase64 parameter is missing in payload.");
       return res.status(400).json({ error: "No PDF document uploaded or found in the request." });
     }
+
+    console.log(`Processing file: ${fileName || 'unnamed.pdf'}. Size of base64 payload: ${Math.round(pdfBase64.length / 1024)} KB`);
 
     let cleanBase64 = pdfBase64;
     if (cleanBase64.includes(";base64,")) {
@@ -304,14 +302,16 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
     try {
       const pdfBuffer = Buffer.from(cleanBase64, "base64");
       rawText = parsePdfBufferPureJS(pdfBuffer);
+      console.log(`Pure JS text extraction complete. Extracted text length: ${rawText.length} characters.`);
     } catch (parseErr) {
       console.warn("Failed pre-parsing text from PDF inside analyze-policy:", parseErr);
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
+    console.log(`Evaluating Gemini API Key configuration. Key present? ${!!apiKey}`);
 
     if (!isValidGeminiKey(apiKey)) {
-      // Direct Dynamic Fallback using local PDF regex and heuristics
+      console.log("No valid Gemini API Key found in Environment. Launching dynamic fallback parser...");
       const dynamicAnalysis = await extractAnalysisFromPdfContent(cleanBase64, fileName);
       const policyId = "pol_dynamic_" + Date.now();
       policyCache.set(policyId, { pdfBase64: cleanBase64, analysis: dynamicAnalysis, rawText });
@@ -325,8 +325,8 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
 
     try {
       const ai = getGeminiClient();
+      console.log("Gemini API Client successfully initialized. Dispatching payload...");
 
-      // Ask Gemini 2.5 Flash to dynamically extract facts directly from the payload using native JSON schema syntax strings
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: {
@@ -368,7 +368,6 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
 
       let resultText = response.text || "{}";
       
-      // Clean up markdown wrapping safely without throwing RegExp cut-off errors
       if (resultText.includes("```")) {
         resultText = resultText
           .replace(/```json/gi, "")
@@ -377,8 +376,8 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
       }
       
       const data = JSON.parse(resultText);
+      console.log("Structured JSON successfully received from Gemini API.");
 
-      // Validate extracted insuredName using smart regex fallback if API missed it
       if (!data.insuredName || isNumericOrSerial(data.insuredName) || data.insuredName.toLowerCase().includes("not available")) {
         const localExtracted = extractNameFromText(rawText);
         if (localExtracted && localExtracted !== "Valued Policyholder") {
@@ -398,7 +397,7 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
       });
 
     } catch (apiErr: any) {
-      console.warn("Gemini API call failed, using dynamic local parsing fallback:", apiErr);
+      console.warn("Gemini API transaction failed. Reverting to local fallback parser:", apiErr.message || apiErr);
       const dynamicAnalysis = await extractAnalysisFromPdfContent(cleanBase64, fileName);
       const policyId = "pol_fallback_" + Date.now();
       policyCache.set(policyId, { pdfBase64: cleanBase64, analysis: dynamicAnalysis, rawText });
@@ -411,7 +410,7 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
     }
 
   } catch (err: any) {
-    console.error("Error analyzing PDF policy:", err);
+    console.error("Critical Server failure in analyze-policy:", err);
     return res.status(500).json({ 
       error: "Failed to read or analyze policy document.", 
       message: err.message || "Unknown error occurred" 
@@ -444,7 +443,6 @@ app.post("/api/chat-policy", async (req, res): Promise<any> => {
           normalizedBase64 = normalizedBase64.split(";base64,")[1];
         }
         
-        // Dynamically parse context on the fly if cached session is missing
         const analysis = await extractAnalysisFromPdfContent(normalizedBase64, "Uploaded_Policy.pdf");
         cachedAnalysis = analysis;
         cachedAnalysisStr = JSON.stringify(analysis);
