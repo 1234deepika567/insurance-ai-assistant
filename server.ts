@@ -106,7 +106,7 @@ function extractNameFromText(text: string): string {
   
   const sameLinePatterns = [
     /(?:insured\s+name|name\s+of\s+(?:the\s+)?insured|policyholder(?:\s*name)?|name\s+of\s+(?:the\s+)?policyholder|proposer(?:\s*name)?|name\s+of\s+(?:the\s+)?proposer|member\s+name|patient\s+name|client\s+name|primary\s+insured|insured\s*person(?:s)?(?:\s*name)?)\s*[:=\-/]+\s*([A-Za-z\s'\.]{3,50})/i,
-    /^(?:insured\s+name|name\s+of\s+(?:the\s+)?insured|policyholder(?:\s*name)?|name\s+of\s+(?:the\s+)?policyholder|proposer(?:\s*name)?|name\s+of\s+(?:the\s+)?proposer)\s*[:=\-/]?\s*([A-Za-z\s'\.]{3,50})$/i
+    /^(?:insured\s+name|name\s+of\s+(?:the\s+)?insured|policyholder\s*name|name\s+of\s+(?:the\s+)?policyholder|proposer\s*name|name\s+of\s+(?:the\s+)?proposer)\s*[:=\-/]?\s*([A-Za-z\s'\.]{3,50})$/i
   ];
 
   const labelPatterns = [
@@ -353,5 +353,201 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
       });
 
       let resultText = response.text || "{}";
+      
+      // Clean up markdown wrapping safely without throwing RegExp cut-off errors
       if (resultText.includes("```")) {
-        const match = resultText.match(/
+        resultText = resultText
+          .replace(/```json/gi, "")
+          .replace(/```/g, "")
+          .trim();
+      }
+      
+      const data = JSON.parse(resultText);
+
+      // Validate extracted insuredName using smart regex fallback if API missed it
+      if (!data.insuredName || isNumericOrSerial(data.insuredName) || data.insuredName.toLowerCase().includes("not available")) {
+        const localExtracted = extractNameFromText(rawText);
+        if (localExtracted && localExtracted !== "Valued Policyholder") {
+          data.insuredName = localExtracted;
+        } else {
+          data.insuredName = extractNameFromFileName(fileName);
+        }
+      }
+
+      const policyId = "pol_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
+      policyCache.set(policyId, { pdfBase64: cleanBase64, analysis: data, rawText });
+
+      return res.json({ 
+        success: true, 
+        policyId, 
+        analysis: data 
+      });
+
+    } catch (apiErr: any) {
+      console.warn("Gemini API call failed, using dynamic local parsing fallback:", apiErr);
+      const dynamicAnalysis = await extractAnalysisFromPdfContent(cleanBase64, fileName);
+      const policyId = "pol_fallback_" + Date.now();
+      policyCache.set(policyId, { pdfBase64: cleanBase64, analysis: dynamicAnalysis, rawText });
+
+      return res.json({
+        success: true,
+        policyId,
+        analysis: dynamicAnalysis
+      });
+    }
+
+  } catch (err: any) {
+    console.error("Error analyzing PDF policy:", err);
+    return res.status(500).json({ 
+      error: "Failed to read or analyze policy document.", 
+      message: err.message || "Unknown error occurred" 
+    });
+  }
+});
+
+// 2. Chat with Policy PDF Endpoint
+app.post("/api/chat-policy", async (req, res): Promise<any> => {
+  let cachedAnalysis: any = null;
+  let parsedRawText = "";
+  const { pdfBase64, message, history, policyId } = req.body;
+
+  try {
+    let cleanBase64 = pdfBase64;
+    let cachedAnalysisStr = "";
+
+    if (policyId && policyCache.has(policyId)) {
+      const cached = policyCache.get(policyId);
+      if (cached) {
+        cleanBase64 = cached.pdfBase64;
+        cachedAnalysis = cached.analysis;
+        cachedAnalysisStr = JSON.stringify(cached.analysis);
+        parsedRawText = cached.rawText || "";
+      }
+    } else if (cleanBase64) {
+      try {
+        let normalizedBase64 = cleanBase64;
+        if (normalizedBase64.includes(";base64,")) {
+          normalizedBase64 = normalizedBase64.split(";base64,")[1];
+        }
+        
+        // Dynamically parse context on the fly if cached session is missing
+        const analysis = await extractAnalysisFromPdfContent(normalizedBase64, "Uploaded_Policy.pdf");
+        cachedAnalysis = analysis;
+        cachedAnalysisStr = JSON.stringify(analysis);
+        
+        try {
+          const pdfBuffer = Buffer.from(normalizedBase64, "base64");
+          const parsePdf = typeof pdf === "function" ? pdf : ((pdf as any).default || pdf);
+          const parsed = await parsePdf(pdfBuffer);
+          parsedRawText = parsed.text || "";
+        } catch (pe) {
+          console.warn("Self-healing raw text parse failed:", pe);
+        }
+
+        if (policyId) {
+          policyCache.set(policyId, { pdfBase64: normalizedBase64, analysis, rawText: parsedRawText });
+        }
+      } catch (cacheErr) {
+        console.error("Cache miss self-healing extraction failed:", cacheErr);
+      }
+    }
+
+    if (!cleanBase64) {
+      return res.status(400).json({ error: "Missing insurance policy context. Please upload a policy PDF first." });
+    }
+    if (!message) {
+      return res.status(400).json({ error: "Missing message to assistant." });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!isValidGeminiKey(apiKey)) {
+      const answer = generateKeywordLocalResponse(message, cachedAnalysis);
+      return res.json({ success: true, answer });
+    }
+
+    try {
+      const ai = getGeminiClient();
+      const cleanHistory = (history || []).filter((msg: any) => msg.id !== "welcome" && msg.text && msg.text.trim());
+
+      const contents: any[] = [];
+      let currentRole: "user" | "model" | null = null;
+      let currentTextParts: string[] = [];
+
+      cleanHistory.forEach((msg: any) => {
+        const nextRole = msg.sender === "user" ? "user" : "model";
+        if (nextRole === currentRole) {
+          currentTextParts.push(msg.text);
+        } else {
+          if (currentRole && currentTextParts.length > 0) {
+            if (!(currentRole === "model" && contents.length === 0)) {
+              contents.push({
+                role: currentRole,
+                parts: [{ text: currentTextParts.join("\n") }]
+              });
+            }
+          }
+          currentRole = nextRole;
+          currentTextParts = [msg.text];
+        }
+      });
+
+      if (currentRole && currentTextParts.length > 0) {
+        if (!(currentRole === "model" && contents.length === 0)) {
+          contents.push({
+            role: currentRole,
+            parts: [{ text: currentTextParts.join("\n") }]
+          });
+        }
+      }
+
+      if (contents.length > 0 && contents[contents.length - 1].role === "user") {
+        contents[contents.length - 1].parts[0].text += "\n" + message;
+      } else {
+        contents.push({
+          role: "user",
+          parts: [{ text: message }]
+        });
+      }
+
+      const systemInstruction = 
+        "You are Neo, an AI assistant representing PhonePe Insure. Answer questions concisely based strictly on context.\n\n" +
+        "CRITICAL RULES:\n" +
+        "1. Answer contextually from the metadata or transcript. Greetings should be met with a friendly welcome.\n" +
+        "2. If missing entirely from context, reply explicitly: \"This information is not available in the uploaded policy.\"\n" +
+        "3. Max 1-2 concise sentences.\n\n" +
+        "PRE-EXTRACTED POLICY CORE METRICS:\n" + cachedAnalysisStr + "\n\n" +
+        (parsedRawText ? `RAW POLICY TRANSCRIPT EXCERPT:\n${parsedRawText.slice(0, 18000)}\n` : "");
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: contents,
+        config: {
+          systemInstruction: systemInstruction
+        }
+      });
+
+      return res.json({
+        success: true,
+        answer: response.text || "This information is not available in the uploaded policy."
+      });
+
+    } catch (apiErr: any) {
+      console.warn("Gemini Chat iteration failed. Running dynamic fallback matching engine:", apiErr);
+      const answer = generateKeywordLocalResponse(message, cachedAnalysis);
+      return res.json({ success: true, answer });
+    }
+
+  } catch (err: any) {
+    console.error("Fatal routing execution in chat endpoint:", err);
+    return res.status(500).json({ error: "Internal processing error during dialog loop." });
+  }
+});
+
+// For local running workflows
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`Server running locally at http://localhost:${PORT}`);
+  });
+}
+
+export default app;
