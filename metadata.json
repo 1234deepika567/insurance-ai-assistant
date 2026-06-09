@@ -1,0 +1,6 @@
+{
+  "name": "Insurance Policy Assistant",
+  "description": "An intelligent AI assistant to upload, analyze, and ask questions about your insurance policies, detailing premium, exclusions, benefits, and claims with high accuracy.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
