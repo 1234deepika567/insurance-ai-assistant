@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import * as pdf from "pdf-parse";
 
 // Load environment variables
@@ -312,7 +312,7 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
     try {
       const ai = getGeminiClient();
 
-      // Ask Gemini 2.5 Flash to dynamically extract facts directly from the payload
+      // Ask Gemini 2.5 Flash to dynamically extract facts directly from the payload using native JSON schema syntax strings
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: {
@@ -332,17 +332,17 @@ app.post("/api/analyze-policy", async (req, res): Promise<any> => {
           systemInstruction: "You are Neo, an expert PhonePe Insure Extractor. Extract information STRICTLY present in the document. If any specific detail is not found, state 'This information is not available in the uploaded policy.'",
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: "OBJECT",
             properties: {
-              policyNumber: { type: Type.STRING, description: "The unique policy identifier or contract number. If absent, set 'This information is not available'." },
-              insuredName: { type: Type.STRING, description: "The name of the policyholder or insured individuals. If absent, set 'This information is not available'." },
-              premiumAmount: { type: Type.STRING, description: "The premium amount including any frequency or currency." },
-              expiryDate: { type: Type.STRING, description: "The policy expiration date or term end date." },
-              coverageDetails: { type: Type.STRING, description: "A summary detailing what is covered. Limit to 300 words." },
-              benefitDetails: { type: Type.STRING, description: "Specific key benefits, perks, add-ons, or standard limits." },
-              claimDetails: { type: Type.STRING, description: "Instructions on how to file claims, claims hotline, or required files." },
-              exclusions: { type: Type.STRING, description: "Key exclusions or items specifically NOT covered." },
-              highLevelSummary: { type: Type.STRING, description: "A professional 2-3 sentence overview of this policy." }
+              policyNumber: { type: "STRING", description: "The unique policy identifier or contract number. If absent, set 'This information is not available'." },
+              insuredName: { type: "STRING", description: "The name of the policyholder or insured individuals. If absent, set 'This information is not available'." },
+              premiumAmount: { type: "STRING", description: "The premium amount including any frequency or currency." },
+              expiryDate: { type: "STRING", description: "The policy expiration date or term end date." },
+              coverageDetails: { type: "STRING", description: "A summary detailing what is covered. Limit to 300 words." },
+              benefitDetails: { type: "STRING", description: "Specific key benefits, perks, add-ons, or standard limits." },
+              claimDetails: { type: "STRING", description: "Instructions on how to file claims, claims hotline, or required files." },
+              exclusions: { type: "STRING", description: "Key exclusions or items specifically NOT covered." },
+              highLevelSummary: { type: "STRING", description: "A professional 2-3 sentence overview of this policy." }
             },
             required: [
               "policyNumber", "insuredName", "premiumAmount", "expiryDate", 
